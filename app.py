@@ -1,151 +1,120 @@
 import streamlit as st
-import asyncio
-from httpx_oauth.clients.google import GoogleOAuth2
 import requests
 
-# -------------------------------------------
-# CONFIG
-# -------------------------------------------
-client_id = st.secrets["client_id"]
-client_secret = st.secrets["client_secret"]
-redirect_url = st.secrets["redirect_url"]         # Example: https://yourapp.streamlit.app/
-firebase_api_key = st.secrets["firebase_api_key"]
+st.set_page_config(page_title="Google Login", page_icon="🔐", layout="centered")
 
-google_client = GoogleOAuth2(client_id, client_secret)
+GOOGLE_CLIENT_ID = st.secrets["google_client_id"]
+FIREBASE_API_KEY = st.secrets["firebase_api_key"]
 
 if "user" not in st.session_state:
     st.session_state.user = None
 
+st.title("🔐 Login with Google — No Redirects, No 403")
 
-# -------------------------------------------
-# GET GOOGLE TOKEN FROM CODE
-# -------------------------------------------
-async def get_tokens(code: str):
-    return await google_client.get_access_token(code, redirect_url)
+# ---------------------------------------------
+# GOOGLE ONE TAP JS WIDGET
+# ---------------------------------------------
+onetap_js = f"""
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+
+<div id="g_id_onload"
+     data-client_id="{GOOGLE_CLIENT_ID}"
+     data-context="signin"
+     data-ux_mode="popup"
+     data-login_uri=""
+     data-auto_prompt="false"
+     data-callback="onGoogleLogin">
+</div>
+
+<div class="g_id_signin"
+     data-type="standard"
+     data-size="large"
+     data-theme="outline"
+     data-text="signin_with"
+     data-shape="rectangular"
+     data-logo_alignment="left">
+</div>
+
+<script>
+function onGoogleLogin(response) {
+    window.parent.postMessage(
+        { "google_token": response.credential },
+        "*"
+    );
+}
+</script>
+"""
+
+st.components.v1.html(onetap_js, height=300)
 
 
-# -------------------------------------------
-# GET USER INFO (NAME, EMAIL, PIC)
-# Google UserInfo API
-# -------------------------------------------
-def get_google_profile(access_token: str):
-    res = requests.get(
-        "https://www.googleapis.com/oauth2/v3/userinfo",
-        headers={"Authorization": f"Bearer {access_token}"}
-    )
-    return res.json()
+# ---------------------------------------------
+# RECEIVE TOKEN FROM JS
+# ---------------------------------------------
+message = st.experimental_get_query_params()
+
+# Streamlit does NOT capture postMessage → use a workaround:
+google_token = st.session_state.get("google_token")
+
+def receive_google_token():
+    from streamlit_javascript import st_javascript
+
+    token = st_javascript("""
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+        let received = null;
+
+        window.addEventListener("message", (e) => {
+            if(e.data.google_token){
+                received = e.data.google_token;
+                sessionStorage.setItem("g_token", received);
+            }
+        });
+
+        await sleep(1000);
+
+        return sessionStorage.getItem("g_token");
+    """)
+    return token
+
+if google_token is None:
+    google_token = receive_google_token()
+    if google_token:
+        st.session_state.google_token = google_token
 
 
-# -------------------------------------------
-# OPTIONAL: SIGN IN TO FIREBASE (REST)
-# -------------------------------------------
-def firebase_sign_in(id_token):
-    url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithIdp?key={firebase_api_key}"
-
+# ---------------------------------------------
+# If Google Token exists → use Firebase REST API to get user info
+# ---------------------------------------------
+def firebase_login(id_token):
+    url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithIdp?key={FIREBASE_API_KEY}"
     payload = {
         "postBody": f"id_token={id_token}&providerId=google.com",
-        "requestUri": redirect_url,
+        "requestUri": "http://localhost",
         "returnSecureToken": True
     }
-
     return requests.post(url, json=payload).json()
 
 
-# -------------------------------------------
-# PROCESS GOOGLE LOGIN
-# -------------------------------------------
-def process_google_login():
-    params = st.experimental_get_query_params()
+if st.session_state.get("google_token"):
+    firebase_user = firebase_login(st.session_state.google_token)
 
-    if "code" not in params:
-        return False
+    if "email" in firebase_user:
+        st.session_state.user = {
+            "email": firebase_user["email"],
+            "name": firebase_user.get("displayName"),
+            "picture": firebase_user.get("photoUrl")
+        }
 
-    code = params["code"][0]
+# ---------------------------------------------
+# SHOW LOGGED IN USER
+# ---------------------------------------------
+if st.session_state.user:
+    st.success(f"Welcome, {st.session_state.user['name']} 👋")
+    if st.session_state.user["picture"]:
+        st.image(st.session_state.user["picture"], width=120)
 
-    # Exchange code → tokens
-    token_data = asyncio.run(get_tokens(code))
-    st.experimental_set_query_params()
-
-    if "access_token" not in token_data:
-        st.error("Google login failed.")
-        return False
-
-    # Get Google user profile
-    profile = get_google_profile(token_data["access_token"])
-
-    st.session_state.user = {
-        "name": profile.get("name"),
-        "email": profile.get("email"),
-        "picture": profile.get("picture"),
-        "sub": profile.get("sub"),
-    }
-
-    return True
-
-
-# -------------------------------------------
-# GOOGLE LOGIN BUTTON
-# -------------------------------------------
-def google_login_button():
-    auth_url = asyncio.run(
-        google_client.get_authorization_url(
-            redirect_url,
-            scope=[
-                "openid",
-                "email",
-                "profile",
-                "https://www.googleapis.com/auth/userinfo.email",
-                "https://www.googleapis.com/auth/userinfo.profile",
-            ],
-            extras_params={"access_type": "offline"}
-        )
-    )
-
-    st.markdown(
-        f"""
-        <a href="{auth_url}" target="_self" 
-        style="padding:14px 25px; background:#4285F4; color:white; 
-               border-radius:8px; text-decoration:none; font-size:18px;
-               font-weight:600; display:inline-block;">
-            🔵 Login with Google
-        </a>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-# -------------------------------------------
-# MAIN APP UI
-# -------------------------------------------
-def app():
-    st.set_page_config(page_title="Login", page_icon="🔐", layout="centered")
-
-    st.title("🔐 Login with Google")
-
-    # If not logged in, process redirect
-    if not st.session_state.user:
-        login_success = process_google_login()
-
-        if not login_success:
-            google_login_button()
-            return
-
-    # Logged in → show welcome page
-    user = st.session_state.user
-
-    st.success(f"Welcome, {user['name']} 👋")
-    st.image(user["picture"], width=120)
-
-    st.write(f"**Email:** {user['email']}")
-    st.write("---")
-    st.write("You are successfully logged in. Redirecting to next page...")
-
-    if st.button("➡ Go to Dashboard"):
-        st.switch_page("pages/dashboard.py")
+    st.write(f"**Email:** {st.session_state.user['email']}")
 
     if st.button("Logout"):
         st.session_state.user = None
         st.rerun()
-
-
-app()
