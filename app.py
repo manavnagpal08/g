@@ -1,147 +1,158 @@
 import streamlit as st
 import requests
-from streamlit.components.v1 import html
+import urllib.parse
 
 st.set_page_config(page_title="Google Login", page_icon="🔐", layout="centered")
 
-GOOGLE_CLIENT_ID = st.secrets["google_client_id"]
+# ---------------------------------------------
+# Load Secrets
+# ---------------------------------------------
+CLIENT_ID = st.secrets["google_client_id"]
+CLIENT_SECRET = st.secrets["google_client_secret"]
+REDIRECT_URI = st.secrets["redirect_uri"]
 FIREBASE_API_KEY = st.secrets["firebase_api_key"]
 
 if "user" not in st.session_state:
     st.session_state.user = None
-if "google_token" not in st.session_state:
-    st.session_state.google_token = None
-
-st.title("🔐 Login with Google — Streamlit Safe Version")
 
 
-# ------------------------------------------------------
-# 1. GOOGLE ONE TAP CODE (No f-string, No JS errors)
-# ------------------------------------------------------
-google_html = f"""
-<script src="https://accounts.google.com/gsi/client" async defer></script>
+# ---------------------------------------------
+# Step 1: Build Google OAuth URL
+# ---------------------------------------------
+def get_google_auth_url():
+    base = "https://accounts.google.com/o/oauth2/v2/auth"
 
-<div id="g_id_onload"
-     data-client_id="{GOOGLE_CLIENT_ID}"
-     data-context="signin"
-     data-ux_mode="popup"
-     data-callback="googleCallback">
-</div>
-
-<div class="g_id_signin"
-     data-type="standard"
-     data-size="large"
-     data-theme="outline"
-     data-text="signin_with"
-     data-shape="rectangular"
-     data-logo_alignment="left">
-</div>
-
-<script>
-function googleCallback(response) {{
-    // Send the token to Streamlit
-    window.parent.postMessage(
-        {{ type: "GOOGLE_LOGIN", token: response.credential }},
-        "*"
-    );
-}}
-</script>
-"""
-
-html(google_html, height=350)
-
-
-# ------------------------------------------------------
-# 2. LISTEN FOR GOOGLE TOKEN VIA postMessage
-# ------------------------------------------------------
-message_listener = """
-<script>
-window.addEventListener("message", (event) => {
-    if (event.data.type === "GOOGLE_LOGIN") {
-        const token = event.data.token;
-        const streamlitEvent = new CustomEvent("streamlit:google_token", {{
-            detail: token
-        }});
-        window.parent.document.dispatchEvent(streamlitEvent);
+    params = {
+        "client_id": CLIENT_ID,
+        "redirect_uri": REDIRECT_URI,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "access_type": "offline",
+        "prompt": "consent"
     }
-});
-</script>
-"""
 
-html(message_listener, height=0)
+    return base + "?" + urllib.parse.urlencode(params)
 
 
-# ------------------------------------------------------
-# 3. CAPTURE TOKEN INSIDE STREAMLIT
-# ------------------------------------------------------
-def catch_google_token():
-    return st.experimental_get_query_params().get("google_token", [None])[0]
+# ---------------------------------------------
+# Step 2: Exchange CODE -> TOKENS
+# ---------------------------------------------
+def exchange_code_for_tokens(code):
+    token_url = "https://oauth2.googleapis.com/token"
+
+    data = {
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "code": code,
+        "redirect_uri": REDIRECT_URI,
+        "grant_type": "authorization_code"
+    }
+
+    res = requests.post(token_url, data=data)
+    return res.json()
 
 
-# component to attach event to streamlit
-token_script = """
-<script>
-document.addEventListener("streamlit:google_token", (event) => {
-    const token = event.detail;
-    const url = new URL(window.location);
-
-    url.searchParams.set("google_token", token);
-    window.location.href = url.toString();
-});
-</script>
-"""
-
-html(token_script, height=0)
-
-google_token = catch_google_token()
-
-if google_token:
-    st.session_state.google_token = google_token
+# ---------------------------------------------
+# Step 3: Get GOOGLE User Info
+# ---------------------------------------------
+def get_google_profile(access_token):
+    res = requests.get(
+        "https://www.googleapis.com/oauth2/v3/userinfo",
+        headers={"Authorization": f"Bearer {access_token}"}
+    )
+    return res.json()
 
 
-# ------------------------------------------------------
-# 4. FIREBASE LOGIN
-# ------------------------------------------------------
-def firebase_login_with_google(id_token):
+# ---------------------------------------------
+# Step 4: Firebase Sign-In with Google Token
+# ---------------------------------------------
+def firebase_sign_in(id_token):
     url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithIdp?key={FIREBASE_API_KEY}"
+
     payload = {
         "postBody": f"id_token={id_token}&providerId=google.com",
-        "requestUri": "https://localhost",  # unused but required
-        "returnSecureToken": True
+        "requestUri": REDIRECT_URI,
+        "returnIdpCredential": True,
+        "returnSecureToken": True,
     }
+
     return requests.post(url, json=payload).json()
 
 
-# ------------------------------------------------------
-# 5. PROCESS LOGIN
-# ------------------------------------------------------
-if st.session_state.google_token and not st.session_state.user:
-    res = firebase_login_with_google(st.session_state.google_token)
+# ---------------------------------------------
+# Step 5: Process Redirect from Google
+# ---------------------------------------------
+def process_google_redirect():
+    params = st.experimental_get_query_params()
+    if "code" not in params:
+        return False
 
-    if "email" in res:
-        st.session_state.user = {
-            "email": res["email"],
-            "name": res.get("displayName", "User"),
-            "picture": res.get("photoUrl", None),
-        }
+    code = params["code"][0]
 
-        # Remove token from URL
-        st.experimental_set_query_params()
+    # Exchange for tokens
+    tokens = exchange_code_for_tokens(code)
+
+    if "access_token" not in tokens:
+        st.error("Login failed: Could not get access token.")
+        return False
+
+    # Clear params from URL
+    st.experimental_set_query_params()
+
+    # Get profile from Google
+    profile = get_google_profile(tokens["access_token"])
+
+    # Firebase login (optional but gives UID)
+    firebase_res = firebase_sign_in(tokens["id_token"])
+
+    # Save user info in session
+    st.session_state.user = {
+        "name": profile.get("name"),
+        "email": profile.get("email"),
+        "picture": profile.get("picture"),
+        "uid": firebase_res.get("localId"),
+    }
+
+    return True
 
 
-# ------------------------------------------------------
-# 6. SHOW USER INFO
-# ------------------------------------------------------
-if st.session_state.user:
-    st.success(f"Welcome {st.session_state.user['name']} 👋")
+# ---------------------------------------------
+# MAIN UI
+# ---------------------------------------------
+st.title("🔐 Login with Google (Redirect Flow - Works 100%)")
 
-    if st.session_state.user["picture"]:
-        st.image(st.session_state.user["picture"], width=120)
+# If user not logged in → handle redirect OR show login button
+if not st.session_state.user:
+    # Attempt to handle redirect
+    if not process_google_redirect():
+        auth_url = get_google_auth_url()
 
-    st.write(f"**Email:** {st.session_state.user['email']}")
+        # Show Google Login Button
+        st.markdown(
+            f"""
+            <a href="{auth_url}" target="_self"
+               style="padding:12px 20px;background:#4285F4;color:white;
+                      border-radius:8px;text-decoration:none;font-size:18px;">
+               🔵 Sign in with Google
+            </a>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.stop()
 
-    if st.button("Logout"):
-        st.session_state.user = None
-        st.session_state.google_token = None
-        st.experimental_set_query_params()
-        st.rerun()
+# ---------------------------------------------
+# After Login: Welcome Screen
+# ---------------------------------------------
+user = st.session_state.user
+
+st.success(f"Welcome {user['name']} 👋")
+
+if user["picture"]:
+    st.image(user["picture"], width=120)
+
+st.write(f"**Email:** {user['email']}")
+st.write(f"**UID:** {user.get('uid')}")
+
+if st.button("Logout"):
+    st.session_state.user = None
+    st.rerun()
