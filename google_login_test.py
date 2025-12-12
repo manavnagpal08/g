@@ -12,35 +12,40 @@ st.write("Click the button below to sign in with Google and retrieve your Fireba
 components.html(
     """
     <script>
-    // Listen for token posted from the iframe
     window.addEventListener("message", (event) => {
         if (event.data.token) {
             const tokenInput = document.getElementById("tokenInput");
             tokenInput.value = event.data.token;
             tokenInput.dispatchEvent(new Event("change"));
         }
+        if (event.data.error) {
+            const errInput = document.getElementById("errorInput");
+            errInput.value = event.data.error;
+            errInput.dispatchEvent(new Event("change"));
+        }
     });
     </script>
 
     <input type="text" id="tokenInput" style="display:none;">
+    <input type="text" id="errorInput" style="display:none;">
     """,
     height=0,
 )
 
-# Hidden text input that triggers a Streamlit session-state update
+# Session update logic
 def on_token_change():
     st.session_state["google_token"] = st.session_state["token_field"]
 
-st.text_input(
-    "hidden_token_field",
-    key="token_field",
-    label_visibility="hidden",
-    on_change=on_token_change,
-)
+def on_error_change():
+    st.session_state["google_error"] = st.session_state["error_field"]
+
+st.text_input("hidden_token_field", key="token_field", label_visibility="hidden", on_change=on_token_change)
+st.text_input("hidden_error_field", key="error_field", label_visibility="hidden", on_change=on_error_change)
 
 # -------------------------------------------------
-# FRONTEND GOOGLE LOGIN BUTTON (Firebase Web SDK)
+# GOOGLE LOGIN BUTTON (WITH POPUP FIX)
 # -------------------------------------------------
+
 firebase_html = """
 <!DOCTYPE html>
 <html>
@@ -50,7 +55,6 @@ firebase_html = """
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js"></script>
 
 <script>
-  // Your Firebase Config (ScreenerPro)
   const firebaseConfig = {
     apiKey: "AIzaSyDjC7tdmpEkpsipgf9r1c3HlTO7C7BZ6Mw",
     authDomain: "screenerproapp.firebaseapp.com",
@@ -79,33 +83,40 @@ firebase_html = """
 <body style="font-family: Arial; text-align: center; margin-top: 20px;">
   <button onclick="googleLogin()"
     style="
-      padding: 12px 20px;
+      padding: 12px 22px;
       background:#4285F4;
       color:white;
       border:none;
       border-radius:8px;
-      font-size:16px;
-      cursor:pointer;">
-      Sign in with Google
+      font-size:17px;
+      cursor:pointer;
+      font-weight:600;">
+      🔵 Sign in with Google
   </button>
 </body>
 </html>
 """
 
-components.html(firebase_html, height=200)
+components.html(
+    firebase_html,
+    height=260,
+    width=350,
+    scrolling=False,
+    sandbox="allow-scripts allow-same-origin allow-popups allow-forms",
+    allow="popup"
+)
 
 # -------------------------------------------------
-# DISPLAY LOGIN RESULT
+# DISPLAY RESULT
 # -------------------------------------------------
 st.write("---")
 
-token = st.session_state.get("google_token")
+if "google_error" in st.session_state and st.session_state["google_error"]:
+    st.error("Google Login Failed:\n" + st.session_state["google_error"])
 
-if token:
-    st.success("Google Login Successful! 🎉")
-    st.write("### Here is your Firebase ID Token:")
-    st.code(token)
-
-    st.info("Next step: We will verify this token via Firebase and log the user in your app.")
+if "google_token" in st.session_state and st.session_state["google_token"]:
+    st.success("🎉 Google Login Successful!")
+    st.write("### Your Firebase ID Token:")
+    st.code(st.session_state["google_token"])
 else:
     st.info("Waiting for Google Login...")
