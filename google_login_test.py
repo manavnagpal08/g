@@ -1,21 +1,18 @@
 import streamlit as st
 import streamlit.components.v1 as components
-import json
 
 st.set_page_config(page_title="Google Login Test", page_icon="🔐", layout="centered")
 
-st.title("🔐 Google Login Test (Firebase)")
-st.write("Click the button below to sign in using Google.")
+st.title("🔐 Google Login Test (Firebase - ScreenerPro)")
+st.write("Click the button below to sign in with Google and retrieve your Firebase ID Token.")
 
 # -------------------------------------------------
-# LISTEN FOR TOKEN FROM THE FRONTEND
+# LISTEN FOR TOKEN SENT FROM FRONTEND
 # -------------------------------------------------
-token_placeholder = st.empty()
-
-# Streamlit JS listener
 components.html(
     """
     <script>
+    // Listen for token posted from the iframe
     window.addEventListener("message", (event) => {
         if (event.data.token) {
             const tokenInput = document.getElementById("tokenInput");
@@ -30,50 +27,65 @@ components.html(
     height=0,
 )
 
-token = st.session_state.get("google_token", None)
-
-# Hidden text input to capture token
+# Hidden text input that triggers a Streamlit session-state update
 def on_token_change():
     st.session_state["google_token"] = st.session_state["token_field"]
 
-st.text_input("hidden_token_field", key="token_field", label_visibility="hidden", on_change=on_token_change)
+st.text_input(
+    "hidden_token_field",
+    key="token_field",
+    label_visibility="hidden",
+    on_change=on_token_change,
+)
 
 # -------------------------------------------------
-# FRONTEND GOOGLE LOGIN BUTTON
+# FRONTEND GOOGLE LOGIN BUTTON (Firebase Web SDK)
 # -------------------------------------------------
 firebase_html = """
 <!DOCTYPE html>
 <html>
 <head>
+
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js"></script>
 
 <script>
+  // Your Firebase Config (ScreenerPro)
   const firebaseConfig = {
-    apiKey: "YOUR_API_KEY",
-    authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+    apiKey: "AIzaSyDjC7tdmpEkpsipgf9r1c3HlTO7C7BZ6Mw",
+    authDomain: "screenerproapp.firebaseapp.com",
+    projectId: "screenerproapp"
   };
+
   firebase.initializeApp(firebaseConfig);
 
   function googleLogin() {
     const provider = new firebase.auth.GoogleAuthProvider();
+
     firebase.auth().signInWithPopup(provider)
-    .then((result) => {
-      result.user.getIdToken().then((token) => {
-        window.parent.postMessage({token: token}, "*");
+      .then((result) => {
+        result.user.getIdToken().then((token) => {
+          window.parent.postMessage({token: token}, "*");
+        });
+      })
+      .catch((error) => {
+        window.parent.postMessage({error: error.message}, "*");
       });
-    })
-    .catch((error) => {
-      window.parent.postMessage({error: error.message}, "*");
-    });
   }
 </script>
+
 </head>
 
 <body style="font-family: Arial; text-align: center; margin-top: 20px;">
-  <button onclick="googleLogin()" 
-    style="padding: 12px 20px; background:#4285F4; color:white; border:none;
-           border-radius:8px; cursor:pointer; font-size:16px;">
+  <button onclick="googleLogin()"
+    style="
+      padding: 12px 20px;
+      background:#4285F4;
+      color:white;
+      border:none;
+      border-radius:8px;
+      font-size:16px;
+      cursor:pointer;">
       Sign in with Google
   </button>
 </body>
@@ -87,11 +99,13 @@ components.html(firebase_html, height=200)
 # -------------------------------------------------
 st.write("---")
 
-if "google_token" in st.session_state and st.session_state["google_token"]:
-    st.success("Google Login Successful!")
-    st.code(st.session_state["google_token"], language="text")
+token = st.session_state.get("google_token")
 
-    st.write("Now you can verify token using Firebase REST API.")
+if token:
+    st.success("Google Login Successful! 🎉")
+    st.write("### Here is your Firebase ID Token:")
+    st.code(token)
 
+    st.info("Next step: We will verify this token via Firebase and log the user in your app.")
 else:
-    st.info("Waiting for Google login...")
+    st.info("Waiting for Google Login...")
