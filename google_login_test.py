@@ -1,56 +1,21 @@
 import streamlit as st
 import streamlit.components.v1 as components
+import base64
+import tempfile
 
-st.set_page_config(page_title="Google Login Test", page_icon="🔐", layout="centered")
+st.set_page_config(page_title="Google Login Test", page_icon="🔐")
 
 st.title("🔐 Google Login Test (Firebase - ScreenerPro)")
 st.write("Click the button below to sign in with Google and retrieve your Firebase ID Token.")
 
-# -------------------------------------------------
-# LISTEN FOR TOKEN SENT FROM FRONTEND
-# -------------------------------------------------
-components.html(
-    """
-    <script>
-    window.addEventListener("message", (event) => {
-        if (event.data.token) {
-            const tokenInput = document.getElementById("tokenInput");
-            tokenInput.value = event.data.token;
-            tokenInput.dispatchEvent(new Event("change"));
-        }
-        if (event.data.error) {
-            const errInput = document.getElementById("errorInput");
-            errInput.value = event.data.error;
-            errInput.dispatchEvent(new Event("change"));
-        }
-    });
-    </script>
-
-    <input type="text" id="tokenInput" style="display:none;">
-    <input type="text" id="errorInput" style="display:none;">
-    """,
-    height=0,
-)
-
-# Session update logic
-def on_token_change():
-    st.session_state["google_token"] = st.session_state["token_field"]
-
-def on_error_change():
-    st.session_state["google_error"] = st.session_state["error_field"]
-
-st.text_input("hidden_token_field", key="token_field", label_visibility="hidden", on_change=on_token_change)
-st.text_input("hidden_error_field", key="error_field", label_visibility="hidden", on_change=on_error_change)
-
-# -------------------------------------------------
-# GOOGLE LOGIN BUTTON (WITH POPUP FIX)
-# -------------------------------------------------
+# /////////////////////////////////
+# FRONTEND HTML (Stored in temp file)
+# /////////////////////////////////
 
 firebase_html = """
 <!DOCTYPE html>
 <html>
 <head>
-
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js"></script>
 
@@ -65,7 +30,6 @@ firebase_html = """
 
   function googleLogin() {
     const provider = new firebase.auth.GoogleAuthProvider();
-
     firebase.auth().signInWithPopup(provider)
       .then((result) => {
         result.user.getIdToken().then((token) => {
@@ -78,45 +42,73 @@ firebase_html = """
   }
 </script>
 
-</head>
+<style>
+button {
+    padding: 14px 24px;
+    background: #4285F4;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: 18px;
+    cursor: pointer;
+    font-weight: bold;
+}
+</style>
 
-<body style="font-family: Arial; text-align: center; margin-top: 20px;">
-  <button onclick="googleLogin()"
-    style="
-      padding: 12px 22px;
-      background:#4285F4;
-      color:white;
-      border:none;
-      border-radius:8px;
-      font-size:17px;
-      cursor:pointer;
-      font-weight:600;">
-      🔵 Sign in with Google
-  </button>
+</head>
+<body>
+    <button onclick="googleLogin()">Sign in with Google</button>
 </body>
 </html>
 """
 
-components.html(
-    firebase_html,
-    height=260,
-    width=350,
-    scrolling=False,
-    sandbox="allow-scripts allow-same-origin allow-popups allow-forms",
-    allow="popup"
+# Write HTML to a temporary file
+with tempfile.NamedTemporaryFile("w", delete=False, suffix=".html") as f:
+    f.write(firebase_html)
+    temp_file_path = f.name
+
+# /////////////////////////////////
+# IFRAME INSTEAD OF HTML COMPONENT
+# /////////////////////////////////
+
+components.iframe(
+    src=f"file://{temp_file_path}",
+    height=200,
 )
 
-# -------------------------------------------------
-# DISPLAY RESULT
-# -------------------------------------------------
+# /////////////////////////////////
+# CAPTURE TOKEN OR ERROR
+# /////////////////////////////////
+
+components.html(
+    """
+    <script>
+    window.addEventListener("message", (event) => {
+        const input = document.getElementById("tokenInput");
+        input.value = event.data.token || event.data.error || "";
+        input.dispatchEvent(new Event("change"));
+    });
+    </script>
+    <input type="text" id="tokenInput" style="display:none;">
+    """,
+    height=0
+)
+
+def on_change():
+    st.session_state["google_result"] = st.session_state["input_res"]
+
+st.text_input("hidden", key="input_res", label_visibility="hidden", on_change=on_change)
+
+# Output
 st.write("---")
 
-if "google_error" in st.session_state and st.session_state["google_error"]:
-    st.error("Google Login Failed:\n" + st.session_state["google_error"])
+result = st.session_state.get("google_result")
 
-if "google_token" in st.session_state and st.session_state["google_token"]:
-    st.success("🎉 Google Login Successful!")
-    st.write("### Your Firebase ID Token:")
-    st.code(st.session_state["google_token"])
+if result:
+    if "ey" in result:  # Firebase token always begins with "ey..."
+        st.success("🎉 Google Login Successful!")
+        st.code(result)
+    else:
+        st.error("❌ Login Failed: " + result)
 else:
-    st.info("Waiting for Google Login...")
+    st.info("Waiting for Google login...")
