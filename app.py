@@ -9,21 +9,23 @@ FIREBASE_API_KEY = st.secrets["firebase_api_key"]
 
 if "user" not in st.session_state:
     st.session_state.user = None
+if "google_token" not in st.session_state:
+    st.session_state.google_token = None
 
-st.title("🔐 Login with Google — One Tap (No Redirect)")
+st.title("🔐 Login with Google — Streamlit Safe Version")
 
 
-# -------------------------------------------
-# GOOGLE ONE-TAP WIDGET (SAFE VERSION)
-# -------------------------------------------
-one_tap_template = """
+# ------------------------------------------------------
+# 1. GOOGLE ONE TAP CODE (No f-string, No JS errors)
+# ------------------------------------------------------
+google_html = f"""
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 
 <div id="g_id_onload"
-     data-client_id="CLIENT_ID_REPLACE"
+     data-client_id="{GOOGLE_CLIENT_ID}"
      data-context="signin"
      data-ux_mode="popup"
-     data-callback="onGoogleLogin">
+     data-callback="googleCallback">
 </div>
 
 <div class="g_id_signin"
@@ -36,88 +38,110 @@ one_tap_template = """
 </div>
 
 <script>
-function onGoogleLogin(response) {
+function googleCallback(response) {{
+    // Send the token to Streamlit
     window.parent.postMessage(
-        { "google_token": response.credential },
+        {{ type: "GOOGLE_LOGIN", token: response.credential }},
         "*"
     );
-}
+}}
 </script>
 """
 
-one_tap_html = one_tap_template.replace("CLIENT_ID_REPLACE", GOOGLE_CLIENT_ID)
-
-html(one_tap_html, height=350)
+html(google_html, height=350)
 
 
-# -------------------------------------------
-# RECEIVE GOOGLE TOKEN FROM JS → STREAMLIT
-# -------------------------------------------
-def receive_google_token():
-    from streamlit_javascript import st_javascript
+# ------------------------------------------------------
+# 2. LISTEN FOR GOOGLE TOKEN VIA postMessage
+# ------------------------------------------------------
+message_listener = """
+<script>
+window.addEventListener("message", (event) => {
+    if (event.data.type === "GOOGLE_LOGIN") {
+        const token = event.data.token;
+        const streamlitEvent = new CustomEvent("streamlit:google_token", {{
+            detail: token
+        }});
+        window.parent.document.dispatchEvent(streamlitEvent);
+    }
+});
+</script>
+"""
 
-    token = st_javascript("""
-        const sleep = ms => new Promise(r => setTimeout(r, ms));
-        let stored = sessionStorage.getItem("g_token");
-
-        window.addEventListener("message", (e) => {
-            if(e.data.google_token){
-                sessionStorage.setItem("g_token", e.data.google_token);
-            }
-        });
-
-        await sleep(1000);
-        return sessionStorage.getItem("g_token");
-    """)
-
-    return token
+html(message_listener, height=0)
 
 
-token = receive_google_token()
-if token and "google_token" not in st.session_state:
-    st.session_state.google_token = token
+# ------------------------------------------------------
+# 3. CAPTURE TOKEN INSIDE STREAMLIT
+# ------------------------------------------------------
+def catch_google_token():
+    return st.experimental_get_query_params().get("google_token", [None])[0]
 
 
-# -------------------------------------------
-# FIREBASE REST LOGIN
-# -------------------------------------------
-def firebase_login(id_token):
+# component to attach event to streamlit
+token_script = """
+<script>
+document.addEventListener("streamlit:google_token", (event) => {
+    const token = event.detail;
+    const url = new URL(window.location);
+
+    url.searchParams.set("google_token", token);
+    window.location.href = url.toString();
+});
+</script>
+"""
+
+html(token_script, height=0)
+
+google_token = catch_google_token()
+
+if google_token:
+    st.session_state.google_token = google_token
+
+
+# ------------------------------------------------------
+# 4. FIREBASE LOGIN
+# ------------------------------------------------------
+def firebase_login_with_google(id_token):
     url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithIdp?key={FIREBASE_API_KEY}"
     payload = {
         "postBody": f"id_token={id_token}&providerId=google.com",
-        "requestUri": "http://localhost",
+        "requestUri": "https://localhost",  # unused but required
         "returnSecureToken": True
     }
     return requests.post(url, json=payload).json()
 
 
-# -------------------------------------------
-# PROCESS LOGIN
-# -------------------------------------------
-if st.session_state.get("google_token") and not st.session_state.user:
-    res = firebase_login(st.session_state.google_token)
+# ------------------------------------------------------
+# 5. PROCESS LOGIN
+# ------------------------------------------------------
+if st.session_state.google_token and not st.session_state.user:
+    res = firebase_login_with_google(st.session_state.google_token)
 
     if "email" in res:
         st.session_state.user = {
             "email": res["email"],
-            "name": res.get("displayName"),
-            "picture": res.get("photoUrl")
+            "name": res.get("displayName", "User"),
+            "picture": res.get("photoUrl", None),
         }
 
+        # Remove token from URL
+        st.experimental_set_query_params()
 
-# -------------------------------------------
-# SHOW USER PROFILE
-# -------------------------------------------
+
+# ------------------------------------------------------
+# 6. SHOW USER INFO
+# ------------------------------------------------------
 if st.session_state.user:
     st.success(f"Welcome {st.session_state.user['name']} 👋")
 
-    if st.session_state.user.get("picture"):
+    if st.session_state.user["picture"]:
         st.image(st.session_state.user["picture"], width=120)
 
     st.write(f"**Email:** {st.session_state.user['email']}")
 
     if st.button("Logout"):
-        sessionStorage = st.session_state
         st.session_state.user = None
         st.session_state.google_token = None
+        st.experimental_set_query_params()
         st.rerun()
