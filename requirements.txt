@@ -1,0 +1,5 @@
+streamlit
+firebase-admin
+httpx-oauth
+asyncio
+python-dotenv
