@@ -3,66 +3,44 @@ import asyncio
 from httpx_oauth.clients.google import GoogleOAuth2
 import requests
 
-# -----------------------------
-# DEBUG HELPER (FIXED)
-# -----------------------------
-def debug(msg, data=None):
-    st.write(f"🟡 DEBUG: {msg}")
-    if data is not None:
-        if isinstance(data, (dict, list)):
-            st.json(data)
-        else:
-            st.write(data)
-
-
-# -----------------------------
-# GOOGLE OAuth2 Setup
-# -----------------------------
+# -------------------------------------------
+# CONFIG
+# -------------------------------------------
 client_id = st.secrets["client_id"]
 client_secret = st.secrets["client_secret"]
-redirect_url = st.secrets["redirect_url"]   # Example: https://YOURAPP.streamlit.app/
+redirect_url = st.secrets["redirect_url"]         # Example: https://yourapp.streamlit.app/
+firebase_api_key = st.secrets["firebase_api_key"]
 
 google_client = GoogleOAuth2(client_id, client_secret)
 
-FIREBASE_API_KEY = st.secrets["firebase_api_key"]
-
-if "email" not in st.session_state:
-    st.session_state.email = None
+if "user" not in st.session_state:
+    st.session_state.user = None
 
 
-# -----------------------------
-# 1. Exchange CODE → Google Tokens
-# -----------------------------
+# -------------------------------------------
+# GET GOOGLE TOKEN FROM CODE
+# -------------------------------------------
 async def get_tokens(code: str):
-    debug("Exchanging CODE for Google tokens...", {"code": code})
-    try:
-        token_data = await google_client.get_access_token(code, redirect_url)
-        debug("Google Token Response", token_data)
-        return token_data
-    except Exception as e:
-        st.error(f"❌ ERROR exchanging Google token: {e}")
-        return None
+    return await google_client.get_access_token(code, redirect_url)
 
 
-# -----------------------------
-# 2. Get Google Profile Info
-# -----------------------------
-async def get_user_info(access_token: str):
-    debug("Getting Google user info...", access_token)
-    try:
-        user_id, user_email = await google_client.get_id_email(access_token)
-        debug("Google User Info", {"user_id": user_id, "email": user_email})
-        return user_id, user_email
-    except Exception as e:
-        st.error(f"❌ ERROR getting Google user info: {e}")
-        return None, None
+# -------------------------------------------
+# GET USER INFO (NAME, EMAIL, PIC)
+# Google UserInfo API
+# -------------------------------------------
+def get_google_profile(access_token: str):
+    res = requests.get(
+        "https://www.googleapis.com/oauth2/v3/userinfo",
+        headers={"Authorization": f"Bearer {access_token}"}
+    )
+    return res.json()
 
 
-# -----------------------------
-# 3. Firebase REST API Login
-# -----------------------------
-def firebase_signin_with_google(id_token: str):
-    url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithIdp?key={FIREBASE_API_KEY}"
+# -------------------------------------------
+# OPTIONAL: SIGN IN TO FIREBASE (REST)
+# -------------------------------------------
+def firebase_sign_in(id_token):
+    url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithIdp?key={firebase_api_key}"
 
     payload = {
         "postBody": f"id_token={id_token}&providerId=google.com",
@@ -70,132 +48,103 @@ def firebase_signin_with_google(id_token: str):
         "returnSecureToken": True
     }
 
-    debug("Sending payload to Firebase Sign-In", payload)
-
-    try:
-        res = requests.post(url, json=payload)
-        json_res = res.json()
-        debug("Firebase REST API Response", json_res)
-        return json_res
-    except Exception as e:
-        st.error(f"❌ Firebase sign-in REST error: {e}")
-        return None
+    return requests.post(url, json=payload).json()
 
 
-# -----------------------------
-# PROCESS GOOGLE LOGIN FLOW
-# -----------------------------
+# -------------------------------------------
+# PROCESS GOOGLE LOGIN
+# -------------------------------------------
 def process_google_login():
     params = st.experimental_get_query_params()
-    debug("URL Query Params", params)
 
-    code = params.get("code")
-    if not code:
-        debug("No 'code' found in URL. User has not logged in yet.")
+    if "code" not in params:
         return False
 
-    code = code[0]
-    debug("Google Returned CODE", code)
+    code = params["code"][0]
 
-    # 1. Exchange code → tokens
+    # Exchange code → tokens
     token_data = asyncio.run(get_tokens(code))
-
-    if not token_data:
-        st.error("❌ Google token_data is EMPTY.")
-        return False
+    st.experimental_set_query_params()
 
     if "access_token" not in token_data:
-        st.error("❌ Google did NOT return access_token")
+        st.error("Google login failed.")
         return False
 
-    st.experimental_set_query_params()  # Clear ?code=...
-    debug("Cleared URL Parameters")
+    # Get Google user profile
+    profile = get_google_profile(token_data["access_token"])
 
-    # 2. Fetch email from Google
-    _, email = asyncio.run(get_user_info(token_data["access_token"]))
+    st.session_state.user = {
+        "name": profile.get("name"),
+        "email": profile.get("email"),
+        "picture": profile.get("picture"),
+        "sub": profile.get("sub"),
+    }
 
-    if not email:
-        st.error("❌ Could not retrieve Google email.")
-        return False
-
-    debug("Google Email Retrieved", email)
-
-    # 3. Firebase Login via REST
-    firebase_res = firebase_signin_with_google(token_data["id_token"])
-
-    if firebase_res is None:
-        st.error("❌ Firebase returned NULL")
-        return False
-
-    if "error" in firebase_res:
-        st.error(f"🔥 Firebase Error: {firebase_res['error']}")
-        return False
-
-    if "email" in firebase_res:
-        st.session_state.email = firebase_res["email"]
-        st.session_state.firebase_uid = firebase_res.get("localId")
-        st.session_state.firebase_token = firebase_res.get("idToken")
-
-        debug("Firebase Login Success", firebase_res)
-        return True
-
-    st.error("❌ Firebase did NOT return email")
-    debug("Unexpected Firebase response", firebase_res)
-    return False
+    return True
 
 
-# -----------------------------
+# -------------------------------------------
 # GOOGLE LOGIN BUTTON
-# -----------------------------
+# -------------------------------------------
 def google_login_button():
-    debug("Generating Google Authorization URL...")
-
     auth_url = asyncio.run(
         google_client.get_authorization_url(
             redirect_url,
-            scope=["email", "profile"],
+            scope=[
+                "openid",
+                "email",
+                "profile",
+                "https://www.googleapis.com/auth/userinfo.email",
+                "https://www.googleapis.com/auth/userinfo.profile",
+            ],
             extras_params={"access_type": "offline"}
         )
     )
 
-    debug("Google Authorization URL", auth_url)
-
     st.markdown(
         f"""
-        <a href="{auth_url}" target="_self"
-           style="padding:12px 20px;background:#4285F4;color:white;
-                  border-radius:8px;text-decoration:none;font-size:16px;">
-           🔵 Login with Google
+        <a href="{auth_url}" target="_self" 
+        style="padding:14px 25px; background:#4285F4; color:white; 
+               border-radius:8px; text-decoration:none; font-size:18px;
+               font-weight:600; display:inline-block;">
+            🔵 Login with Google
         </a>
         """,
         unsafe_allow_html=True,
     )
 
 
-# -----------------------------
-# MAIN APP
-# -----------------------------
+# -------------------------------------------
+# MAIN APP UI
+# -------------------------------------------
 def app():
-    st.title("🔐 Google Login + Firebase (REST API ONLY) — DEBUG MODE")
+    st.set_page_config(page_title="Login", page_icon="🔐", layout="centered")
 
-    debug("Session State", dict(st.session_state))
+    st.title("🔐 Login with Google")
 
-    # If not logged in → handle redirect
-    if not st.session_state.email:
-        logged_in = process_google_login()
+    # If not logged in, process redirect
+    if not st.session_state.user:
+        login_success = process_google_login()
 
-        if not logged_in:
+        if not login_success:
             google_login_button()
             return
 
-    # LOGGED IN SUCCESSFULLY
-    st.success(f"Logged in as {st.session_state.email}")
-    
-    st.write("Firebase UID:", st.session_state.get("firebase_uid"))
-    st.write("Firebase Token:", st.session_state.get("firebase_token"))
+    # Logged in → show welcome page
+    user = st.session_state.user
+
+    st.success(f"Welcome, {user['name']} 👋")
+    st.image(user["picture"], width=120)
+
+    st.write(f"**Email:** {user['email']}")
+    st.write("---")
+    st.write("You are successfully logged in. Redirecting to next page...")
+
+    if st.button("➡ Go to Dashboard"):
+        st.switch_page("pages/dashboard.py")
 
     if st.button("Logout"):
-        st.session_state.email = None
+        st.session_state.user = None
         st.rerun()
 
 
